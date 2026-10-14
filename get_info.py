@@ -1,14 +1,12 @@
-import subprocess
+from scapy.all import conf
+from getmac import get_mac_address 
+#help(get_mac_address)
 
-ip_addr = subprocess.run(["ip", "route"], capture_output=True, text=True)
+net_interface, usr_IP, gateway = conf.route.route("8.8.8.8")
+mac = get_mac_address(net_interface, gateway)
 
-ip_neigh = subprocess.run(["ip", "neigh"], capture_output=True, text=True)
 
-gateway = ip_addr.stdout[ip_addr.stdout.find("via") + 4 :ip_addr.stdout.find('dev') - 1]
-net_interface = ip_addr.stdout[ip_addr.stdout.find("dev") + 4:ip_addr.stdout.find("proto") - 1]
-usrIP = ip_addr.stdout[ip_addr.stdout.find("src") + 4:ip_addr.stdout.find("metric")- 1 ]
-mac = ip_neigh.stdout[ip_neigh.stdout.find("lladdr") + 7 :ip_neigh.stdout.find("REACHABLE") - 1]
-
-print("Your IP-addres:", usrIP, ",", "network interface:", net_interface, ",", "gateway:", gateway)
-print("ARP: 'who is MAC-addres for this gateway?'")
-print ("MAC-addres for this gataway is:", mac)
+print ("your network interface:", net_interface)
+print ("source IP:", usr_IP)
+print ("gateway:", gateway, "\n")
+print ("ARP search MAC address for this gateway:", mac)
