@@ -36,8 +36,8 @@ for server_ip in root_servers_list:
         print (f"successful response from {server_ip}")
         print(response)
         break
-    except excpetion.timeout:
-        print (f"server timeout exceeded, trying another one root-server")
+    except exception.Timeout:
+        print (f"server {server_ip} timeout exceeded, trying another one root-server")
     except Exception as e:
         print (f"an error occurred during polling {server_ip}: {e}")
 
