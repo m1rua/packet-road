@@ -4,6 +4,7 @@ import os
 import sys
 import time
 import random
+from dns import message, query, exception
 
 if os.geteuid() != 0:
     print("The script was not executed via sudo.")
@@ -23,8 +24,28 @@ else:
     print ("cant find your MAC-addres, check your internet connection / router / turn off VPN ")
 
 
+#DNS resolving + get target IP addr
+target_domain = input ("\nEnter domain or IP: ")
+root_servers_list = ["198.41.0.4", "199.9.14.201", "192.33.4.12", "199.7.91.13", "192.203.230.10"]
 
-target = input("\nEnter domain or IP: ")
+request = message.make_query (target_domain, "A")
+for server_ip in root_servers_list:
+    try:
+        print (f"sending a query to the root server: {server_ip}")
+        response = query.udp(request, server_ip, timeout=2)
+        print (f"successful response from {server_ip}")
+        print(response)
+        break
+    except excpetion.timeout:
+        print (f"server timeout exceeded, trying another one root-server")
+    except Exception as e:
+        print (f"an error occurred during polling {server_ip}: {e}")
+
+
+
+
+
+target = input("\n enter the ip: ")
 max_hops = 30
 dport = 443
 sport = random.randint(1024, 65535)  # один порт источника на все пробы
