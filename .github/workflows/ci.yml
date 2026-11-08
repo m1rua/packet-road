@@ -3,10 +3,33 @@ name: CI
 on:
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatc:
+
+permissions:
+  contents: read 
+
+concurrency:
+  group: cli-checks-${{ github.workflow }}-${{ github.ref}}
+  cancel-in-progress: true
 
 jobs:
-  build:
+  ckecks:
+    name: python checks
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v3
-      - run: pip install -r requirements.txt
+      - name: checkout repository
+        uses: actions/checkout@v4
+
+      - name: set up python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: check python syntax
+        run: python -m py_compile get_info.py
+
+      - name: check code with Ruff
+        run: python -m ruff check .
