@@ -1,0 +1,44 @@
+services:
+  app:
+    build:
+      context: .
+      args:
+        APP_REVISION: ${APP_REVISION:-development}
+    image: packet-road:local
+    environment:
+      PACKET_ROAD_TOKEN: ${PACKET_ROAD_TOKEN:?Set a random token with at least 32 characters}
+      PACKET_ROAD_TARGETS: ${PACKET_ROAD_TARGETS:-example.com}
+    ports: ["127.0.0.1:8000:8000"]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 64
+    mem_limit: 256m
+    cpus: 1
+    restart: unless-stopped
+  prometheus:
+    image: prom/prometheus:v3.16.0
+    profiles: [monitoring]
+    command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.retention.time=15d"]
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports: ["127.0.0.1:9090:9090"]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+  grafana:
+    image: grafana/grafana:13.3.0
+    profiles: [monitoring]
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:?Set GRAFANA_PASSWORD}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports: ["127.0.0.1:3000:3000"]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+volumes:
+  prometheus-data:
+  grafana-data:
