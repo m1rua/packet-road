@@ -5,17 +5,17 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
-  workflow_dispatc:
+  workflow_dispatch:
 
 permissions:
   contents: read 
 
 concurrency:
-  group: cli-checks-${{ github.workflow }}-${{ github.ref}}
+  group: cli-checks-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  ckecks:
+  checks:
     name: python checks
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -27,6 +27,10 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      - name: install dependencies
+        run: |
+          python -m pip install -r requirements.txt
 
       - name: check python syntax
         run: python -m py_compile get_info.py
