@@ -1,21 +1,34 @@
-"""Packet Road: DNS, локальный маршрут и TCP traceroute."""
-
+import http.client
 import ipaddress
 import os
 import random
 import socket
+import ssl
 import sys
 import time
 
 import dns.exception
+import dns.flags
+import dns.rcode
 import dns.resolver
-from scapy.all import ARP, ICMP, IP, TCP, Ether, conf, get_if_hwaddr, sr1, srp
+
+from scapy.all import (
+    ARP,
+    ICMP,
+    IP,
+    TCP,
+    Ether,
+    conf,
+    get_if_hwaddr,
+    sr1,
+    srp,
+)
 
 
 def heading(title):
-    print("\n" + "=" * 64)
+    print("\n" + "=" * 68)
     print(title)
-    print("=" * 64)
+    print("=" * 68)
 
 
 def ask_number(prompt, default, converter, minimum, maximum):
@@ -27,7 +40,6 @@ def ask_number(prompt, default, converter, minimum, maximum):
 
         try:
             number = converter(value)
-
             if minimum <= number <= maximum:
                 return number
         except ValueError:
@@ -37,17 +49,22 @@ def ask_number(prompt, default, converter, minimum, maximum):
 
 
 def ask_settings():
-    heading("PACKET ROAD — исследуем путь до сервера")
+    heading("PACKET ROAD — путь от имени сайта до HTTP-ответа")
 
     print(
-        "\nСкрипт определит IP сайта, покажет локальный маршрут"
-        "\nи попробует найти промежуточные узлы до сервера."
-        "\n\nДля выбора значения по умолчанию нажмите Enter."
+        "\nМы последовательно проверим:"
+        "\n  1. Как домен превращается в IPv4 через DNS."
+        "\n  2. Как выбирается локальный маршрут."
+        "\n  3. Какие узлы отвечают на traceroute."
+        "\n  4. Устанавливается ли TCP-соединение."
+        "\n  5. Как проходит TLS для HTTPS."
+        "\n  6. Какой HTTP-ответ возвращает сервер."
+        "\n\nНажмите Enter для выбора значения по умолчанию."
     )
 
     while True:
         target = input(
-            "\nВведите домен или IPv4 [example.com]: "
+            "\nДомен или IPv4 [example.com]: "
         ).strip() or "example.com"
 
         try:
@@ -55,13 +72,15 @@ def ask_settings():
         except ValueError:
             if (
                 any(char.isspace() for char in target)
-                or any(char in target for char in "/:@")
+                or any(char in target for char in "/:@?#")
             ):
-                print(
-                    "Введите только домен или IPv4."
-                    "\nНапример: example.com или 1.1.1.1."
-                    "\nБез https://, номера порта и пути."
-                )
+                print("Введите домен без https://, порта и пути.")
+                continue
+
+            try:
+                target = target.encode("idna").decode("ascii")
+            except UnicodeError:
+                print("Не удалось преобразовать доменное имя.")
                 continue
         else:
             if address.version != 4:
@@ -70,433 +89,566 @@ def ask_settings():
 
         break
 
-    print(
-        "\nTCP-порт определяет сервис, к которому обращаемся."
-        "\n443 обычно используется для HTTPS, 80 — для HTTP."
-    )
+    while True:
+        scheme = input(
+            "Протокол: https или http [https]: "
+        ).strip().lower() or "https"
+
+        if scheme in ("https", "http"):
+            break
+
+        print("Введите https или http.")
 
     port = ask_number(
         "TCP-порт",
-        default=443,
-        converter=int,
-        minimum=1,
-        maximum=65535,
+        443 if scheme == "https" else 80,
+        int,
+        1,
+        65535,
     )
 
-    print(
-        "\nМаксимальное число переходов ограничивает трассировку."
-        "\nОбычно достаточно 30."
-    )
+    while True:
+        path = input("Путь страницы [/]: ").strip() or "/"
+
+        if (
+            path.startswith("/")
+            and not any(
+                char.isspace() or ord(char) < 32 or ord(char) == 127
+                for char in path
+            )
+            and path.isascii()
+            and "#" not in path
+        ):
+            break
+
+        print(
+            "Путь должен начинаться с /, без пробелов и #."
+            "\nНе-ASCII символы используйте в URL-кодировке."
+        )
 
     max_hops = ask_number(
-        "Максимум переходов",
-        default=30,
-        converter=int,
-        minimum=1,
-        maximum=255,
-    )
-
-    print(
-        "\nТаймаут — сколько секунд ждать ответ на каждую пробу."
-        "\nЧем он больше, тем дольше могут занимать проверки."
+        "Максимум переходов traceroute",
+        20,
+        int,
+        1,
+        255,
     )
 
     timeout = ask_number(
-        "Ожидание ответа, секунд",
-        default=2.0,
-        converter=float,
-        minimum=0.1,
-        maximum=60,
+        "Таймаут каждой сетевой операции, секунд",
+        3.0,
+        float,
+        0.1,
+        60,
     )
 
-    return target, port, max_hops, timeout
+    print(
+        "\nПри отсутствии ответов traceroute может занять примерно"
+        f"\n{max_hops * timeout:.0f} секунд плюс время остальных проверок."
+    )
+
+    return target, scheme, port, path, max_hops, timeout
 
 
 def resolve_target(target, timeout):
-    heading("ШАГ 1. ОПРЕДЕЛЯЕМ IP-АДРЕС")
+    heading("1. DNS — ПОЛУЧАЕМ IP-АДРЕС")
 
     try:
         address = ipaddress.ip_address(target)
     except ValueError:
         pass
     else:
-        print(f"\nВы указали IPv4: {address}")
-        print("DNS-запрос не требуется.")
+        print(f"\nУказан IPv4: {address}")
+        print("Имя разрешать не нужно — пропускаем DNS.")
         return str(address)
 
-    print(f"\nВы указали домен: {target}")
-    print(
-        "\nДля отправки IP-пакетов нужен IP-адрес сервера."
-        "\nЗапросим DNS-запись типа A: она связывает доменное"
-        "\nимя с IPv4-адресом."
-    )
-
     resolver = dns.resolver.Resolver()
+    resolver.timeout = timeout
     resolver.lifetime = timeout
 
     print(
-        "\nНастроенные DNS-серверы:",
-        ", ".join(map(str, resolver.nameservers)),
+        f"\nИмя сайта: {target}"
+        "\nДля отправки IP-пакетов нам нужен числовой адрес."
+        "\nЗапрашиваем DNS-запись A — IPv4 для этого имени."
     )
 
+    print("\nDNS-серверы из настроек системы:")
+    for server in resolver.nameservers:
+        print(f"  • {server}")
+
     print(
-        "Обращаемся к настроенному резолверу."
-        "\nОн может вернуть ответ из кеша или найти его через"
-        "\nдругие DNS-серверы. Ручной обход корневых серверов"
-        "\nэтот скрипт пока не выполняет.",
+        "\nСкрипт обращается к настроенному резолверу."
+        "\nЭто может быть роутер, локальный DNS-сервис или внешний DNS."
+        "\nРезолвер может использовать кеш либо обращаться к другим"
+        "\nсерверам. Его внутренние запросы здесь не наблюдаются."
+        "\n\nОтправляем запрос…",
         flush=True,
     )
+
+    start = time.perf_counter()
 
     try:
         answer = resolver.resolve(target, "A", search=False)
     except dns.resolver.NXDOMAIN:
         raise RuntimeError(
-            f"домен {target} не существует по ответу DNS"
+            f"DNS сообщил NXDOMAIN: имя {target} не существует"
         ) from None
     except dns.resolver.NoAnswer:
         raise RuntimeError(
-            f"DNS не вернул IPv4-запись A для {target}"
+            f"для {target} не получена запись A"
         ) from None
     except dns.resolver.NoNameservers:
         raise RuntimeError(
-            "настроенные DNS-серверы не смогли обработать запрос"
+            "DNS-серверы не смогли обработать запрос"
         ) from None
     except dns.exception.Timeout:
         raise RuntimeError(
-            f"DNS не ответил за {timeout} сек."
+            f"DNS-проверка превысила {timeout} сек."
         ) from None
+
+    elapsed = (time.perf_counter() - start) * 1000
+    response = answer.response
+
+    print(f"\nОтвет получен за {elapsed:.1f} мс.")
+    print("Ответивший DNS-сервер:", answer.nameserver)
+    print("Код ответа:", dns.rcode.to_text(response.rcode()))
+    print("Флаги:", dns.flags.to_text(response.flags))
+
+    print(
+        "\nЗаписи в секции Answer:"
+        "\nФормат: имя | TTL кеширования в секундах | класс | тип | значение"
+    )
+
+    for rrset in response.answer:
+        print(rrset.to_text())
+
+    print(
+        "\nDNS TTL — время кеширования записи."
+        "\nЭто другая величина, чем TTL IP-пакета в traceroute."
+    )
+
+    if answer.canonical_name != answer.qname:
+        print(
+            "\nКаноническое имя после DNS-псевдонимов:",
+            answer.canonical_name,
+        )
 
     addresses = list(
         dict.fromkeys(record.address for record in answer)
     )
 
-    print("\nПолучены IPv4-адреса:")
+    print("\nПолученные IPv4:", ", ".join(addresses))
+    print("Для дальнейших проверок выбран:", addresses[0])
 
-    for address in addresses:
-        print(f"  • {address}")
-
-    selected = addresses[0]
-
-    print(f"\nДля дальнейших проверок выбираем: {selected}")
-
-    if len(addresses) > 1:
-        print(
-            "У домена несколько адресов. В этом запуске"
-            "\nпроверяется только первый."
-        )
-
-    return selected
+    return addresses[0]
 
 
 def show_route(target, timeout):
-    heading("ШАГ 2. КАК ПАКЕТ ПОКИНЕТ ЭТОТ КОМПЬЮТЕР")
+    heading("2. МАРШРУТИЗАЦИЯ — КУДА ОТПРАВИТЬ ПАКЕТ")
 
     interface, source, gateway = conf.route.route(target)
 
     if source == "0.0.0.0":
-        raise RuntimeError(
-            f"не найден подходящий IPv4-маршрут к {target}"
-        )
+        raise RuntimeError(f"нет подходящего IPv4-маршрута к {target}")
 
     print(
-        "\nСмотрим таблицу маршрутизации: она определяет,"
-        "\nчерез какой интерфейс отправлять пакет к выбранной цели."
+        "\nScapy выбирает маршрут к целевому IP из своей таблицы"
+        "\nмаршрутизации, загруженной из системы."
     )
 
-    print(f"\nЦелевой IPv4:   {target}")
-    print(f"Интерфейс:      {interface}")
-    print(f"Исходный IPv4:  {source}")
+    print(f"\nIP назначения:   {target}")
+    print(f"Исходный IP:     {source}")
+    print(f"Интерфейс:       {interface}")
+    print(f"Шлюз:           {gateway}")
 
     print(
-        "\nЭто локальный исходный адрес. При выходе в интернет"
-        "\nроутер или VPN могут изменить его с помощью NAT."
+        "\nДля обычного IP-маршрута каждый маршрутизатор выбирает"
+        "\nследующий узел по своей таблице маршрутизации."
+        "\nIP назначения остаётся адресом сервера, а заголовок"
+        "\nлокального канала меняется между сегментами сети."
+        "\nNAT, VPN и прокси могут менять эту картину."
     )
 
     if str(interface) == "lo":
-        print(
-            "\nВыбран loopback: адрес относится к этому компьютеру."
-            "\nДля такого маршрута ARP не требуется."
-        )
+        print("\nLoopback: пакет остаётся внутри компьютера. ARP не нужен.")
         return
 
     try:
-        print("MAC интерфейса:", get_if_hwaddr(interface))
+        print("\nMAC интерфейса:", get_if_hwaddr(interface))
     except OSError:
-        print("MAC интерфейса определить не удалось.")
+        print("\nMAC интерфейса определить не удалось.")
 
-    if gateway != "0.0.0.0":
-        next_hop = gateway
-
-        print(f"\nСледующий узел — шлюз: {gateway}")
-        print(
-            "IP-пакет адресован конечному серверу, но в локальной"
-            "\nсети кадр сначала передаётся шлюзу."
-        )
-    else:
-        next_hop = target
-
-        print("\nМаршрут не использует отдельный IP-шлюз.")
-        print(
-            "Цель находится в подключённой сети либо маршрут"
-            "\nидёт через интерфейс с другой моделью передачи."
-        )
+    next_hop = gateway if gateway != "0.0.0.0" else target
 
     print(
-        f"\nПробуем узнать MAC следующего узла {next_hop} через ARP."
-        "\nARP используется в локальных IPv4-сетях с Ethernet."
-        "\nНа VPN и других туннелях он может быть неприменим.",
+        f"\nПробуем узнать MAC следующего узла: {next_hop}."
+        "\nВ Ethernet для этого используется широковещательный ARP:"
+        f'\n«У кого IP {next_hop}? Сообщите свой MAC».'
+        "\nНа туннельных интерфейсах ARP может быть неприменим.",
         flush=True,
-    )
-
-    packet = (
-        Ether(dst="ff:ff:ff:ff:ff:ff")
-        / ARP(pdst=next_hop)
     )
 
     try:
         answered, _ = srp(
-            packet,
+            Ether(dst="ff:ff:ff:ff:ff:ff") / ARP(pdst=next_hop),
             iface=interface,
             timeout=timeout,
             verbose=0,
         )
-    except (OSError, RuntimeError) as error:
-        print(f"\nARP-проверку выполнить не удалось: {error}")
-        print("Продолжаем TCP-проверки.")
-        return
 
-    if answered:
-        mac = answered[0][1][ARP].hwsrc
+        if answered:
+            print(
+                "\nПолучен ARP-ответ. MAC следующего узла:",
+                answered[0][1][ARP].hwsrc,
+            )
+        else:
+            print("\nARP-ответ не получен. Продолжаем проверки.")
 
-        print(f"\nПолучен ARP-ответ: {next_hop} → {mac}")
-        print(
-            "Это MAC следующего узла локального канала,"
-            "\nа не MAC удалённого сайта."
-        )
-    else:
-        print(f"\nARP-ответ не получен за {timeout} сек.")
-        print(
-            "Это может быть связано с типом интерфейса,"
-            "\nтуннелем или отсутствием ответа в локальной сети."
-            "\nПродолжаем TCP-проверки."
-        )
+    except Exception as error:
+        print(f"\nARP-проверка не выполнена: {error}")
+        print("Продолжаем проверки.")
+
+    print(
+        "\nЭто MAC локального следующего узла, а не удалённого сайта."
+        "\nОбычные TCP-соединения ниже создаёт ядро ОС. При VPN"
+        "\nи сложной policy routing их путь может отличаться"
+        "\nот пути raw-пакетов Scapy."
+    )
 
 
 def trace_route(target, port, max_hops, timeout):
-    heading("ШАГ 3. ИССЛЕДУЕМ ПУТЬ ДО СЕРВЕРА")
-
-    print(f"\nАдрес сервера: {target}")
-    print(f"TCP-порт:      {port}")
-    print(f"Ожидание:      {timeout} сек. на каждую пробу")
-    print(f"Лимит:         {max_hops} переходов")
+    heading("3. TRACEROUTE — ИЩЕМ ПРОМЕЖУТОЧНЫЕ УЗЛЫ")
 
     print(
-        "\nОтправляем TCP SYN — пакеты, которыми обычно начинается"
-        "\nустановка TCP-соединения."
-        "\n"
-        "\nУ IP-пакета есть TTL — ограничение числа переходов."
-        "\nКаждый маршрутизатор уменьшает TTL на 1. Когда TTL"
-        "\nзаканчивается, пакет удаляется, а маршрутизатор"
-        "\nможет ответить сообщением ICMP Time Exceeded."
-        "\n"
-        "\nНачнём с TTL=1 и будем постепенно увеличивать его."
-        "\nТак попробуем увидеть промежуточные узлы."
-        "\nНе все узлы отвечают на диагностические пробы."
+        "\nОтправляем отдельные TCP SYN с возрастающим IP TTL."
+        "\nTTL=1 позволяет попробовать увидеть первый маршрутизатор,"
+        "\nTTL=2 — второй и так далее."
+        "\n\nПри исчерпании TTL маршрутизатор может ответить"
+        "\nICMP Time Exceeded. Отсутствие ответа не доказывает,"
+        "\nчто через него не проходит обычный трафик."
     )
 
     sport = random.randint(32768, 60999)
     reached = False
-    received_replies = 0
 
-    for ttl in range(1, max_hops + 1):
-        print(f"\n── Проба {ttl}/{max_hops}: TTL={ttl} ──")
-        print(
-            f"Отправляем TCP SYN на {target}:{port}.",
-            flush=True,
-        )
-
-        packet = (
-            IP(dst=target, ttl=ttl)
-            / TCP(sport=sport, dport=port, flags="S")
-        )
-
-        start = time.perf_counter()
-        reply = sr1(packet, verbose=0, timeout=timeout)
-        rtt = (time.perf_counter() - start) * 1000
-
-        if reply is None:
-            print(f"Ответ не получен за {timeout} сек.")
+    try:
+        for ttl in range(1, max_hops + 1):
             print(
-                "Адрес этого перехода определить не удалось."
-                "\nЭто не доказывает, что трафик здесь обрывается."
+                f"\nTTL={ttl}: отправляем TCP SYN → {target}:{port}",
+                flush=True,
             )
-            continue
 
-        received_replies += 1
+            packet = (
+                IP(dst=target, ttl=ttl)
+                / TCP(sport=sport, dport=port, flags="S")
+            )
 
-        print(f"Получен ответ от: {reply.src}")
-        print(f"Время до ответа:  {rtt:.1f} мс")
+            start = time.perf_counter()
+            reply = sr1(packet, timeout=timeout, verbose=0)
+            elapsed = (time.perf_counter() - start) * 1000
 
-        # ICMP-ошибка может содержать исходную TCP-пробу.
-        # Сначала проверяем ICMP, чтобы не принять её за ответ цели.
-        if reply.haslayer(ICMP):
-            icmp = reply[ICMP]
-
-            if icmp.type == 11 and icmp.code == 0:
-                print("Тип ответа: ICMP Time Exceeded.")
+            if reply is None:
                 print(
-                    "TTL закончился на этом маршрутизаторе."
-                    "\nУвеличиваем TTL и пробуем пройти дальше."
+                    f"  Ответа нет за {timeout} сек."
+                    "\n  Узел не определён; продолжаем."
                 )
                 continue
 
-            if icmp.type == 3:
-                reasons = {
-                    0: "сеть назначения недоступна",
-                    1: "узел назначения недоступен",
-                    2: "протокол недоступен",
-                    3: "порт недоступен",
-                    4: "нужна фрагментация, но она запрещена",
-                    9: "доступ к сети запрещён",
-                    10: "доступ к узлу запрещён",
-                    13: "передача запрещена административными правилами",
-                }
+            print(f"  Ответ от {reply.src}, RTT {elapsed:.1f} мс.")
 
-                reason = reasons.get(
-                    icmp.code,
-                    "другая причина недоступности",
-                )
+            if reply.haslayer(ICMP):
+                icmp = reply[ICMP]
 
-                print("Тип ответа: ICMP Destination Unreachable.")
-                print(f"Причина: {reason}; код {icmp.code}.")
-                print(
-                    "Узел сообщил, что пробу нельзя доставить."
-                    "\nОстанавливаем трассировку."
-                )
-                break
+                if icmp.type == 11 and icmp.code == 0:
+                    print(
+                        "  ICMP Time Exceeded: здесь закончился TTL."
+                    )
+                elif icmp.type == 3:
+                    print(
+                        "  ICMP Destination Unreachable:"
+                        f" узел сообщил о недоступности, код {icmp.code}."
+                        "\n  Останавливаем трассировку."
+                    )
+                    break
+                else:
+                    print(
+                        f"  ICMP type={icmp.type}, code={icmp.code}."
+                    )
 
-            print(
-                f"Другое ICMP-сообщение: "
-                f"type={icmp.type}, code={icmp.code}."
-            )
-            continue
+            elif reply.src == target and reply.haslayer(TCP):
+                flags = int(reply[TCP].flags)
 
-        if reply.src == target and reply.haslayer(TCP):
-            flags = int(reply[TCP].flags)
+                if flags & 0x04:
+                    print(
+                        "  TCP RST с адреса цели: порт закрыт"
+                        "\n  или соединение отклонено."
+                    )
+                    reached = True
+                    break
 
-            if flags & 0x04:
-                print("Тип ответа: TCP RST — отказ в соединении.")
-                print(
-                    "Получен ответ с адреса цели."
-                    "\nПорт может быть закрыт или соединение"
-                    "\nотклонено фильтром."
-                )
-                reached = True
-                break
+                if (flags & 0x12) == 0x12:
+                    print(
+                        "  TCP SYN-ACK с адреса цели: порт открыт."
+                    )
+                    reached = True
+                    break
 
-            if (flags & 0x12) == 0x12:
-                print("Тип ответа: TCP SYN-ACK.")
-                print(
-                    "Получен ответ с адреса цели: порт открыт"
-                    "\nи готов к установке TCP-соединения."
-                )
-                print(
-                    "Эта проба не выполняет TLS и не запрашивает"
-                    "\nстраницу по HTTP."
-                )
-                reached = True
-                break
+                print(f"  Другие TCP-флаги: {reply[TCP].flags}.")
+            else:
+                print("  Неожиданный ответ.")
 
-            print(
-                f"Неожиданные TCP-флаги: {reply[TCP].flags}."
-                "\nПродолжаем трассировку."
-            )
-        else:
-            print(
-                "Получен ответ, который не удалось распознать"
-                "\nкак ожидаемый ответ маршрутизатора или цели."
-            )
+    except Exception as error:
+        print(f"\nОшибка traceroute: {error}")
+        print("Продолжаем обычное TCP-подключение.")
 
-    heading("РЕЗУЛЬТАТ ТРАССИРОВКИ")
-
-    if reached:
-        print("\nПолучен TCP-ответ с адреса цели.")
-    elif received_replies == 0:
-        print("\nНи одна проба не получила ответа.")
+    if not reached:
         print(
-            "По этим данным нельзя определить маршрут"
-            "\nили сделать вывод о доступности сайта."
-        )
-    else:
-        print(f"\nПолучено ответов на пробы: {received_replies}.")
-        print(
-            "Часть маршрута видна, но конечный TCP-ответ"
-            "\nне получен в пределах заданного числа переходов."
+            "\nКонечный TCP-ответ в трассировке не получен."
+            "\nЭто ещё не означает, что сайт недоступен."
         )
 
     print(
-        "\nТрассировка использует отдельные диагностические пакеты."
-        "\nЭто не перехват запроса браузера. Маршрут может меняться,"
-        "\nа обратный путь может отличаться от прямого."
+        "\nЭто диагностические пробы, а не перехват HTTP-запроса."
+        "\nСледующее соединение может пройти другим маршрутом."
     )
 
     return reached
 
 
-def check_tcp_connection(target, port, timeout):
-    heading("ШАГ 4. ПРОВЕРЯЕМ ОБЫЧНОЕ TCP-СОЕДИНЕНИЕ")
-
-    print(
-        "\nТеперь попросим операционную систему установить обычное"
-        "\nTCP-соединение без искусственного уменьшения TTL."
-        "\nЭто отдельная проверка доступности порта."
+def format_certificate_name(parts):
+    return ", ".join(
+        f"{key}={value}"
+        for group in parts
+        for key, value in group
     )
 
-    print(f"\nПодключаемся к {target}:{port}…", flush=True)
 
-    start = time.perf_counter()
+def request_site(target, target_ip, scheme, port, path, timeout):
+    heading("4. TCP — УСТАНАВЛИВАЕМ СОЕДИНЕНИЕ")
+
+    print(
+        f"\nПодключаемся к {target_ip}:{port}."
+        "\nВызываем обычный socket.connect()."
+        "\nЯдро ОС выполняет TCP-рукопожатие:"
+        "\n  клиент → SYN"
+        "\n  сервер → SYN-ACK"
+        "\n  клиент → ACK"
+        "\n\nЭто объяснение протокола. Отдельные пакеты этого"
+        "\nсоединения скрипт не захватывает.",
+        flush=True,
+    )
+
+    connection = None
+    response = None
 
     try:
-        with socket.create_connection(
-            (target, port),
-            timeout=timeout,
-        ):
-            elapsed = (time.perf_counter() - start) * 1000
+        start = time.perf_counter()
 
-        print("\nTCP-соединение успешно установлено.")
-        print(f"Время установки: {elapsed:.1f} мс.")
-        print(
-            "Операционная система выполнила TCP-рукопожатие."
-            "\nЗатем скрипт закрыл соединение без отправки"
-            "\nприкладных данных."
+        connection = socket.create_connection(
+            (target_ip, port),
+            timeout=timeout,
         )
+
+        elapsed = (time.perf_counter() - start) * 1000
+
+        local_ip, local_port = connection.getsockname()
+        peer_ip, peer_port = connection.getpeername()
+
+        print(f"\nTCP-соединение установлено за {elapsed:.1f} мс.")
+        print(f"Локальный сокет: {local_ip}:{local_port}")
+        print(f"Удалённый сокет: {peer_ip}:{peer_port}")
+
+        if scheme == "https":
+            heading("5. TLS — ЗАЩИЩАЕМ СОЕДИНЕНИЕ")
+
+            print(
+                "\nПоверх установленного TCP запускаем TLS."
+                "\nДля домена передаём имя через SNI, чтобы сервер"
+                "\nмог выбрать нужный сайт и сертификат."
+                "\nПри подключении по IP библиотека SNI с IP не отправляет."
+                "\n\nПроверяем сертификат по системным доверенным CA"
+                "\nи соответствие сертификата введённому домену или IP."
+                "\nПроверка сертификата включена.",
+                flush=True,
+            )
+
+            context = ssl.create_default_context()
+            start = time.perf_counter()
+
+            connection = context.wrap_socket(
+                connection,
+                server_hostname=target,
+            )
+
+            elapsed = (time.perf_counter() - start) * 1000
+            certificate = connection.getpeercert()
+            cipher = connection.cipher()
+
+            print(f"\nTLS установлен за {elapsed:.1f} мс.")
+            print("Версия:", connection.version())
+            print("Набор шифров:", cipher[0] if cipher else "неизвестен")
+
+            print(
+                "Субъект сертификата:",
+                format_certificate_name(
+                    certificate.get("subject", ())
+                ),
+            )
+            print(
+                "Издатель сертификата:",
+                format_certificate_name(
+                    certificate.get("issuer", ())
+                ),
+            )
+            print(
+                "Сертификат действует до:",
+                certificate.get("notAfter", "неизвестно"),
+            )
+
+            print(
+                "\nПроверка сертификата прошла."
+                "\nПрикладные данные будут защищены TLS."
+                "\nIP-адреса и TCP-порты TLS не скрывает."
+            )
+        else:
+            heading("5. TLS — ПРОПУСКАЕМ")
+
+            print(
+                "\nВыбран HTTP: TLS не используется."
+                "\nЗапрос и ответ передаются без защиты TLS."
+            )
+
+        heading("6. HTTP — ЗАПРАШИВАЕМ СТРАНИЦУ")
+
+        default_port = 443 if scheme == "https" else 80
+        host = target if port == default_port else f"{target}:{port}"
+
+        request = (
+            f"GET {path} HTTP/1.1\r\n"
+            f"Host: {host}\r\n"
+            "User-Agent: packet-road/1.0\r\n"
+            "Accept: */*\r\n"
+            "Connection: close\r\n"
+            "\r\n"
+        )
+
         print(
-            "\nОткрытый TCP-порт ещё не означает, что сайт"
-            "\nкорректно отвечает по HTTPS: TLS и HTTP"
-            "\nв этой версии не проверяются."
+            "\nОтправляем HTTP/1.1 GET."
+            "\nЗаголовок Host сообщает, какой сайт запрашивается:"
+            "\nодин IP может обслуживать несколько доменов."
+            "\n\nСодержимое запроса до шифрования:\n"
+        )
+
+        print(request.rstrip())
+
+        if scheme == "https":
+            print(
+                "\nНа сетевом канале этот HTTP-запрос передаётся"
+                "\nвнутри зашифрованных TLS-записей."
+            )
+
+        start = time.perf_counter()
+
+        connection.sendall(request.encode("ascii"))
+
+        response = http.client.HTTPResponse(connection)
+        response.begin()
+
+        for _ in range(10):
+            if not (
+                100 <= response.status < 200
+                and response.status != 101
+            ):
+                break
+
+            print(f"\nПромежуточный HTTP-ответ: {response.status}")
+            response.close()
+            response = http.client.HTTPResponse(connection)
+            response.begin()
+        else:
+            raise RuntimeError("слишком много промежуточных HTTP-ответов")
+
+        elapsed = (time.perf_counter() - start) * 1000
+
+        version = {
+            10: "HTTP/1.0",
+            11: "HTTP/1.1",
+        }.get(response.version, f"HTTP version={response.version}")
+
+        print(
+            f"\nПолучен ответ: {version} "
+            f"{response.status} {response.reason}"
+        )
+
+        print(
+            f"От отправки запроса до получения заголовков: "
+            f"{elapsed:.1f} мс."
+        )
+
+        print("\nЗаголовки ответа:")
+        for name, value in response.getheaders():
+            print(f"  {name}: {value}")
+
+        if 200 <= response.status < 300:
+            print("\nСервер сообщил об успешной обработке запроса.")
+        elif 300 <= response.status < 400:
+            print(
+                "\nСервер вернул ответ класса 3xx."
+                "\nЕсли это перенаправление, адрес указан в Location."
+                "\nСкрипт автоматически по нему не переходит."
+            )
+        elif 400 <= response.status < 500:
+            print(
+                "\nHTTP-сервер доступен, но сообщил об ошибке"
+                "\nкласса 4xx, например 404 — страница не найдена."
+            )
+        elif response.status >= 500:
+            print(
+                "\nHTTP-сервер ответил ошибкой класса 5xx."
+                "\nПроблема может быть в приложении или upstream-сервисе."
+            )
+
+        print(
+            "\nТело страницы не скачиваем и не отображаем."
+            "\nHTTP-ответ получен; соединение закрываем."
         )
 
         return True
 
-    except ConnectionRefusedError:
-        print("\nВ TCP-соединении отказано.")
+    except ssl.SSLCertVerificationError as error:
+        print(f"\nНе прошла проверка TLS-сертификата: {error}")
         print(
-            "Возможно, на порту нет слушающего сервиса"
-            "\nили соединение активно отклоняется."
+            "TCP работал, но доверенное HTTPS-соединение"
+            "\nустановить не удалось. Проверку не отключаем."
+            "\nПри вводе IP сертификат должен содержать именно"
+            "\nэтот IP; обычно для HTTPS следует вводить домен."
+        )
+
+    except ssl.SSLError as error:
+        print(f"\nОшибка TLS: {error}")
+        print("Проверьте, поддерживает ли выбранный порт HTTPS.")
+
+    except ConnectionRefusedError:
+        print(
+            "\nВ TCP-соединении отказано."
+            "\nСервис может не слушать порт или соединение отклоняется."
         )
 
     except (socket.timeout, TimeoutError):
         print(
-            f"\nСоединение не установлено за {timeout} сек."
-        )
-        print(
-            "Возможны фильтрация, проблемы маршрута"
-            "\nили недоступность сервера."
-            "\nОдного таймаута недостаточно для точного вывода."
+            "\nТекущая сетевая операция превысила таймаут."
+            "\nСмотрите последний начатый шаг: TCP, TLS или HTTP."
         )
 
-    except OSError as error:
-        print(f"\nОшибка TCP-соединения: {error}")
+    except (OSError, http.client.HTTPException, RuntimeError) as error:
+        print(f"\nПроверку завершить не удалось: {error}")
+
+    finally:
+        if response is not None:
+            response.close()
+
+        if connection is not None:
+            connection.close()
 
     return False
 
@@ -505,13 +657,20 @@ def main():
     try:
         if hasattr(os, "geteuid") and os.geteuid() != 0:
             print(
-                "Для ARP и TCP-проб нужны права root."
-                "\nЗапустите: sudo .venv/bin/python get_info.py",
+                "Для ARP и traceroute нужны права root."
+                "\nЗапуск: sudo .venv/bin/python get_info.py",
                 file=sys.stderr,
             )
             return 1
 
-        target, port, max_hops, timeout = ask_settings()
+        (
+            target,
+            scheme,
+            port,
+            path,
+            max_hops,
+            timeout,
+        ) = ask_settings()
 
         target_ip = resolve_target(target, timeout)
 
@@ -524,35 +683,52 @@ def main():
             timeout,
         )
 
-        tcp_connected = check_tcp_connection(
+        http_received = request_site(
+            target,
             target_ip,
+            scheme,
             port,
+            path,
             timeout,
         )
 
         heading("ИТОГ")
 
-        print(f"\nЦель: {target} → {target_ip}:{port}")
+        print(f"\nДомен или адрес: {target}")
+        print(f"Выбранный IPv4: {target_ip}")
+        print(f"Протокол и порт: {scheme}, {port}")
 
-        if trace_reached:
-            print("Трассировка: получен TCP-ответ с адреса цели.")
-        else:
-            print("Трассировка: конечный TCP-ответ не получен.")
+        print(
+            "Traceroute:",
+            "получен TCP-ответ цели"
+            if trace_reached
+            else "конечный TCP-ответ не получен",
+        )
 
-        if tcp_connected:
-            print("Обычное TCP-соединение: успешно.")
+        print(
+            "HTTP:",
+            "ответ получен"
+            if http_received
+            else "проверка не завершена",
+        )
 
-            if not trace_reached:
-                print(
-                    "\nTCP-порт доступен, хотя трассировка"
-                    "\nне получила конечный ответ."
-                    "\nНужно отдельно исследовать фильтрацию проб,"
-                    "\nVPN и особенности отправки raw-пакетов."
-                )
-        else:
-            print("Обычное TCP-соединение: не установлено.")
+        if http_received and not trace_reached:
+            print(
+                "\nHTTP работает, хотя traceroute не достиг цели."
+                "\nОтветы на диагностические пробы и доступность"
+                "\nприложения — разные проверки."
+            )
 
-        return 0 if tcp_connected else 2
+        print(
+            "\nУпрощённая вложенность данных для HTTPS:"
+            "\n  HTTP → TLS → TCP → IP → локальный канал"
+            "\n\nДанные могут делиться на несколько сегментов и пакетов."
+            "\nТочный путь внутри инфраструктуры сайта этот CLI"
+            "\nне видит: для него нужны логи, метрики и трассировка"
+            "\nсо стороны сервера."
+        )
+
+        return 0 if http_received else 2
 
     except (KeyboardInterrupt, EOFError):
         print("\nРабота остановлена пользователем.")
