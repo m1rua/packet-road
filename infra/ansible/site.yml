@@ -1,0 +1,81 @@
+---
+- name: Prepare a single-server educational k3s cluster
+  hosts: k3s
+  become: true
+  vars:
+    k3s_version: v1.37.2+k3s1
+    # Official sha256sum-amd64.txt from the pinned k3s release. Update together.
+    k3s_sha256: 265b3ee6a3198ef14033c63ef46cbb32370d83795199fb6d1b01f21575eddbda
+  pre_tasks:
+    - name: Require explicit checksum and supported host
+      ansible.builtin.assert:
+        that:
+          - ansible_architecture == 'x86_64'
+          - ansible_service_mgr == 'systemd'
+          - k3s_sha256 is match('^[a-f0-9]{64}$')
+        fail_msg: Supply the official k3s sha256 and use an x86_64 systemd Linux server
+  tasks:
+    - name: Download verified k3s binary
+      ansible.builtin.get_url:
+        url: 'https://github.com/k3s-io/k3s/releases/download/{{ k3s_version }}/k3s'
+        dest: /usr/local/bin/k3s
+        mode: '0755'
+        checksum: 'sha256:{{ k3s_sha256 }}'
+      notify: Restart k3s
+    - name: Create k3s configuration directory
+      ansible.builtin.file:
+        path: /etc/rancher/k3s
+        state: directory
+        mode: '0700'
+    - name: Install k3s configuration
+      ansible.builtin.copy:
+        dest: /etc/rancher/k3s/config.yaml
+        mode: '0600'
+        content: |
+          write-kubeconfig-mode: "0600"
+          disable:
+            - traefik
+            - servicelb
+      notify: Restart k3s
+    - name: Install systemd service
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/k3s.service
+        mode: '0644'
+        content: |
+          [Unit]
+          Description=k3s server
+          Wants=network-online.target
+          After=network-online.target
+          [Service]
+          Type=notify
+          ExecStart=/usr/local/bin/k3s server
+          KillMode=process
+          Delegate=yes
+          LimitNOFILE=1048576
+          TasksMax=infinity
+          Restart=always
+          RestartSec=5
+          [Install]
+          WantedBy=multi-user.target
+      notify: Restart k3s
+    - name: Start k3s
+      ansible.builtin.systemd_service:
+        name: k3s
+        daemon_reload: true
+        enabled: true
+        state: started
+    - name: Apply pending restart before readiness check
+      ansible.builtin.meta: flush_handlers
+    - name: Wait for Kubernetes API readiness
+      ansible.builtin.command: /usr/local/bin/k3s kubectl get --raw=/readyz
+      register: ready
+      changed_when: false
+      retries: 30
+      delay: 5
+      until: ready.rc == 0
+  handlers:
+    - name: Restart k3s
+      ansible.builtin.systemd_service:
+        name: k3s
+        daemon_reload: true
+        state: restarted

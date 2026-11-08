@@ -1,0 +1,80 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: packet-road
+  namespace: packet-road
+data:
+  PACKET_ROAD_TARGETS: example.com
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: packet-road
+  namespace: packet-road
+spec:
+  replicas: 1
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels: {app: packet-road}
+  template:
+    metadata:
+      labels: {app: packet-road}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: app
+          image: ghcr.io/m1rua/packet-road:REPLACE_WITH_COMMIT_SHA
+          ports: [{name: http, containerPort: 8000}]
+          envFrom:
+            - configMapRef: {name: packet-road}
+            - secretRef: {name: packet-road}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          resources:
+            requests: {cpu: 100m, memory: 96Mi}
+            limits: {cpu: '1', memory: 256Mi}
+          startupProbe:
+            httpGet: {path: /health/ready, port: http}
+            periodSeconds: 2
+            failureThreshold: 20
+          readinessProbe:
+            httpGet: {path: /health/ready, port: http}
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /health/live, port: http}
+            periodSeconds: 10
+          lifecycle:
+            preStop:
+              exec: {command: [python, -c, 'import time; time.sleep(5)']}
+      terminationGracePeriodSeconds: 40
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: packet-road
+  namespace: packet-road
+spec:
+  selector: {app: packet-road}
+  ports: [{name: http, port: 8000, targetPort: http}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: packet-road-ingress
+  namespace: packet-road
+spec:
+  podSelector:
+    matchLabels: {app: packet-road}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: {matchLabels: {access-packet-road: 'true'}}
+        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: monitoring}}
+      ports: [{protocol: TCP, port: 8000}]

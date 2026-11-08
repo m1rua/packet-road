@@ -1,0 +1,9 @@
+global:
+  scrape_interval: 15s
+scrape_configs:
+  - job_name: packet-road
+    static_configs:
+      - targets: [packet-road.packet-road.svc.cluster.local:8000]
+  - job_name: prometheus
+    static_configs:
+      - targets: [localhost:9090]

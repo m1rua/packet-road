@@ -1,12 +1,128 @@
-name: CI
-
+name: Verify, publish and deploy
 on:
+  pull_request:
   push:
     branches: [main]
-
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: packet-road-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
 jobs:
-  build:
+  verify:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
-      - run: pip install -r requirements.txt
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: pip install -r requirements-dev.txt -e .
+      - run: ruff check . && pytest -q
+      - run: python scripts/check_configs.py
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.11.4
+      - run: terraform -chdir=infra/terraform fmt -check && terraform -chdir=infra/terraform init -backend=false && terraform -chdir=infra/terraform validate
+      - run: pip install ansible-core==2.18.5 && ansible-playbook -i k3s, infra/ansible/site.yml --syntax-check
+      - uses: azure/setup-kubectl@v4
+        with:
+          version: v1.37.2
+      - name: Render and validate Kubernetes schemas
+        shell: bash
+        run: |
+          kubectl kustomize deploy/kubernetes > /tmp/app.yaml
+          kubectl kustomize monitoring > /tmp/monitoring.yaml
+          curl -fsSL https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz -o /tmp/kubeconform.tar.gz
+          echo '95f14e87aa28c09d5941f11bd024c1d02fdc0303ccaa23f61cef67bc92619d73  /tmp/kubeconform.tar.gz' | sha256sum -c -
+          tar -xzf /tmp/kubeconform.tar.gz -C /tmp kubeconform
+          /tmp/kubeconform -strict -summary -kubernetes-version 1.37.0 /tmp/app.yaml /tmp/monitoring.yaml
+
+  image:
+    needs: verify
+    runs-on: ubuntu-latest
+    outputs:
+      digest: ${{ steps.publish.outputs.digest }}
+      image: ${{ steps.name.outputs.image }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - id: name
+        shell: bash
+        run: echo "image=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: packet-road:ci
+          build-args: APP_REVISION=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Smoke test as non-root with all capabilities dropped
+        shell: bash
+        run: |
+          token=$(openssl rand -hex 32)
+          echo "::add-mask::$token"
+          docker run -d --name packet-road --read-only --cap-drop ALL --security-opt no-new-privileges -e PACKET_ROAD_TOKEN="$token" packet-road:ci
+          trap 'docker logs packet-road; docker rm -f packet-road' EXIT
+          for attempt in $(seq 1 20); do
+            if docker exec packet-road python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=2)"; then
+              docker exec packet-road python -c 'import os; assert os.getuid() == 10001'
+              exit 0
+            fi
+            sleep 1
+          done
+          exit 1
+      - uses: docker/login-action@v3
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: publish
+        uses: docker/build-push-action@v6
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.name.outputs.image }}:${{ github.sha }}
+          build-args: APP_REVISION=${{ github.sha }}
+          cache-from: type=gha
+  deploy:
+    needs: image
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && vars.DEPLOY_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-kubectl@v4
+        with:
+          version: v1.37.2
+      - name: Apply immutable image and check rollout
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+          IMAGE: ${{ needs.image.outputs.image }}@${{ needs.image.outputs.digest }}
+        shell: bash
+        run: |
+          umask 077
+          export KUBECONFIG="$RUNNER_TEMP/kubeconfig"
+          trap 'rm -f "$KUBECONFIG"' EXIT
+          printf '%s' "$KUBE_CONFIG" > "$KUBECONFIG"
+          kubectl -n packet-road get secret packet-road >/dev/null
+          cd deploy/kubernetes
+          kubectl kustomize . > "$RUNNER_TEMP/rendered.yaml"
+          # Bootstrap namespace is applied separately by the administrator.
+          python - "$RUNNER_TEMP/rendered.yaml" "$IMAGE" <<'PY'
+          import sys
+          p, image = sys.argv[1:]
+          s = open(p).read().replace('ghcr.io/m1rua/packet-road:REPLACE_WITH_COMMIT_SHA', image)
+          open(p, 'w').write(s)
+          PY
+          # Namespace is cluster-scoped; deploy credential only needs namespaced resources.
+          kubectl apply -f "$RUNNER_TEMP/rendered.yaml" --dry-run=client >/dev/null
+          kubectl -n packet-road apply -f "$RUNNER_TEMP/rendered.yaml"
+          kubectl -n packet-road rollout status deployment/packet-road --timeout=120s

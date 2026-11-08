@@ -1,0 +1,47 @@
+# Administrator applies once after namespace bootstrap. Not part of application kustomize.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: packet-road-deployer
+  namespace: packet-road
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: packet-road-deployer
+  namespace: packet-road
+rules:
+  - apiGroups: ['']
+    resources: [services, configmaps]
+    verbs: [get, list, watch, create, update, patch]
+  - apiGroups: [apps]
+    resources: [deployments]
+    verbs: [get, list, watch, create, update, patch]
+  - apiGroups: [networking.k8s.io]
+    resources: [networkpolicies]
+    verbs: [get, list, watch, create, update, patch]
+  - apiGroups: ['']
+    resources: [secrets]
+    resourceNames: [packet-road]
+    verbs: [get]
+  - apiGroups: ['']
+    resources: [pods]
+    verbs: [get, list, watch]
+  - apiGroups: [apps]
+    resources: [replicasets]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: packet-road-deployer
+  namespace: packet-road
+subjects:
+  - kind: ServiceAccount
+    name: packet-road-deployer
+    namespace: packet-road
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: packet-road-deployer

@@ -1,0 +1,13 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: monitoring
+resources: [kubernetes.yaml]
+configMapGenerator:
+  - name: prometheus-config
+    files: [prometheus.yml=prometheus-k8s.yml]
+  - name: grafana-datasource
+    files: [prometheus.yaml=grafana/provisioning/datasources/prometheus.yaml]
+  - name: grafana-provider
+    files: [packet-road.yaml=grafana/provisioning/dashboards/packet-road.yaml]
+  - name: grafana-dashboard
+    files: [packet-road.json=grafana/dashboards/packet-road.json]
