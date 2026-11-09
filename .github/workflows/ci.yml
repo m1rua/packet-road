@@ -37,3 +37,14 @@ jobs:
 
       - name: check code with Ruff
         run: python -m ruff check .
+    
+  docker-build:
+    name: docker build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: checks
+    steps:
+      - name: checkout repository
+        uses: actions/checkout@v4
+      - name: docker build
+        run: docker build -t packet-road .
