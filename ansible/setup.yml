@@ -1,0 +1,35 @@
+- name: Prepare lab server
+  hosts: lab
+  become: true
+
+  vars:
+    packet_road_image: ghcr.io/m1rua/packet-road:sha-891906fc6da533ea8a4de7130062e4e56e2fadbf
+
+  vars_files:
+    - vault.yml
+
+  tasks:
+    - name: install docker
+      ansible.builtin.apt:
+        name: docker.io
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+    
+    - name: run docker
+      ansible.builtin.systemd_service:
+        name: docker
+        state: started
+        enabled: true
+    
+    - name: docker authorization
+      community.docker.docker_login:
+        registry_url: ghcr.io
+        username: m1rua
+        password: "{{ ghcr_token }}"
+      no_log: true
+
+    - name: pull packet-road image
+      community.docker.docker_image_pull: 
+        name: "{{ packet_road_image }}"
+        pull: not_present
