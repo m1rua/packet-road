@@ -33,3 +33,40 @@
       community.docker.docker_image_pull:
         name: "{{ packet_road_image }}"
         pull: not_present
+
+    - name: Download node exporter
+      ansible.builtin.apt:
+        name: prometheus-node-exporter
+        state: present
+
+    - name: Run node exporter
+      ansible.builtin.systemd_service:
+        name: prometheus-node-exporter
+        state: started
+        enabled: true
+
+    - name: Install prometheus
+      ansible.builtin.apt:
+        name: prometheus
+        state: present
+
+    - name: Prometheus yaml delivery to VM 
+      ansible.builtin.copy:
+        src: prometheus.yml
+        dest: /etc/prometheus/prometheus.yml
+        owner: root
+        group: prometheus
+        mode: "0640"
+        validate: "/usr/bin/promtool check config %s"
+      notify: Restart Prometheus
+
+    - name: Run prometheus
+      ansible.builtin.systemd_service:
+        name: prometheus
+        state: started
+        enabled: true
+  handlers:
+    - name: Restart Prometheus
+      ansible.builtin.systemd_service:
+        name: prometheus
+        state: restarted
