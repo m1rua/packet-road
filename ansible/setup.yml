@@ -51,6 +51,16 @@
         name: prometheus
         state: present
 
+    - name: Deliver prometheus alert rules
+      ansible.builtin.copy:
+        src: alerts.yml
+        dest: /etc/prometheus/alerts.yml
+        owner: root
+        group: prometheus
+        mode: "0640"
+        validate: "/usr/bin/promtool check rules %s"
+      notify: Restart Prometheus
+
     - name: Prometheus yaml delivery to VM 
       ansible.builtin.copy:
         src: prometheus.yml

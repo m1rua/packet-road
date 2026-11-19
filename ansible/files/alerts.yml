@@ -1,0 +1,11 @@
+groups:
+  - name: lab
+    rules:
+      - alert: NodeExporterDown
+        expr: up{job="node"} == 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Node Exporter недоступен"
+          description: "Prometheus не может собрать метрики с {{ $labels.instance }} в течение минуты"
