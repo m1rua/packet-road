@@ -72,6 +72,57 @@
         name: grafana_data
         state: present
 
+    - name: Create grafana path on VM
+      ansible.builtin.file:
+        path: /opt/packet-road/grafana/provisioning/datasources
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+    
+    - name: Deliver grafana config to VM
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../monitoring/grafana/provisioning/datasources/prometheus.yml"
+        dest: /opt/packet-road/grafana/provisioning/datasources/prometheus.yml
+        owner: root
+        group: root
+        mode: "0644"
+      notify: Restart Grafana
+
+    - name: Create provider path on VM
+      ansible.builtin.file:
+        path: /opt/packet-road/grafana/provisioning/dashboards
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Deliver provider to VM
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../monitoring/grafana/provisioning/dashboards/dashboards.yml"
+        dest: /opt/packet-road/grafana/provisioning/dashboards/dashboards.yml
+        owner: root
+        group: root
+        mode: "0644"
+      notify: Restart Grafana
+
+    - name: Create Grafana dashboards directory
+      ansible.builtin.file:
+        path: /opt/packet-road/grafana/dashboards
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Deliver Grafana dashboards
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../monitoring/grafana/dashboards/"
+        dest: /opt/packet-road/grafana/dashboards/
+        owner: root
+        group: root
+        mode: "0644"
+        directory_mode: "0755"
+
     - name: Run grafana
       community.docker.docker_container:
         name: grafana
@@ -81,9 +132,17 @@
         network_mode: host
         volumes:
           - grafana_data:/var/lib/grafana
-
+          - /opt/packet-road/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+          - /opt/packet-road/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+          - /opt/packet-road/grafana/dashboards:/var/lib/grafana/dashboards:ro
   handlers:
     - name: Restart Prometheus
       ansible.builtin.systemd_service:
         name: prometheus
         state: restarted
+
+    - name: Restart Grafana
+      community.docker.docker_container:
+        name: grafana
+        state: started
+        restart: true
