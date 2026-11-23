@@ -42,7 +42,7 @@ jobs:
     name: docker build
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    needs: [checks, ansible-checks]
+    needs: [checks, ansible-checks, helm-checks]
     permissions:
       contents: read
       packages: write
@@ -90,3 +90,26 @@ jobs:
       
       - name: syntax check
         run: ansible-playbook -i ansible/inventory.ini ansible/setup.yml --syntax-check
+
+      - name: lint ansible playbook
+        run: ansible-lint ansible/setup.yml
+
+  helm-checks:
+    name: helm-checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: checkout repository
+        uses: actions/checkout@v4
+      
+      - name: download helm
+        uses: azure/setup-helm@v4
+
+      - name: checkout chart
+        run: helm lint helm/packet-road
+
+      - name: render chart with host network
+        run: helm template packet-road helm/packet-road --set hostNetwork=true > /dev/null
+      
+      - name: render chart with pod network
+        run: helm template packet-road helm/packet-road --set hostNetwork=false > /dev/null

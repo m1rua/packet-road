@@ -3,6 +3,9 @@ kind: Pod
 metadata:
   name: packet-road
 spec:
+  hostNetwork: true
+  dnsPolicy: ClusterFirstWithHostNet
+  restartPolicy: Never
   restartPolicy: Never
   containers:
     - name: packet-road

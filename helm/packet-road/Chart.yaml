@@ -1,0 +1,5 @@
+apiVersion: v2
+name: packet-road
+description: "CLI for research road of the network packet"
+type: application
+version: 0.1.0

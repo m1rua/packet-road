@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ .Release.Name }}
+spec:
+  hostNetwork: {{ .Values.hostNetwork }}
+  dnsPolicy: {{ ternary "ClusterFirstWithHostNet" "ClusterFirst" .Values.hostNetwork }}
+  restartPolicy: Never
+  containers:
+    - name: packet-road
+      image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+      imagePullPolicy: {{ .Values.image.pullPolicy }}
+      stdin: true
+      tty: true
+      securityContext:
+        runAsUser: 0
+        capabilities:
+          drop:
+            - ALL
+          add:
+            - NET_RAW
