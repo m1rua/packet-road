@@ -61,7 +61,7 @@
         validate: "/usr/bin/promtool check rules %s"
       notify: Restart Prometheus
 
-    - name: Prometheus yaml delivery to VM 
+    - name: Prometheus yaml delivery to VM
       ansible.builtin.copy:
         src: prometheus.yml
         dest: /etc/prometheus/prometheus.yml
