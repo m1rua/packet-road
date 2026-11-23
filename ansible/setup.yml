@@ -89,7 +89,7 @@
         owner: root
         group: root
         mode: "0755"
-    
+
     - name: Deliver grafana config to VM
       ansible.builtin.copy:
         src: "{{ playbook_dir }}/../monitoring/grafana/provisioning/datasources/prometheus.yml"
