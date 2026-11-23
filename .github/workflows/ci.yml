@@ -101,7 +101,7 @@ jobs:
     steps:
       - name: checkout repository
         uses: actions/checkout@v4
-      
+
       - name: download helm
         uses: azure/setup-helm@v4
 
@@ -110,6 +110,6 @@ jobs:
 
       - name: render chart with host network
         run: helm template packet-road helm/packet-road --set hostNetwork=true > /dev/null
-      
+
       - name: render chart with pod network
         run: helm template packet-road helm/packet-road --set hostNetwork=false > /dev/null
