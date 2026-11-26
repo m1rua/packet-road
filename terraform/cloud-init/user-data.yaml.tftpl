@@ -1,0 +1,21 @@
+#cloud-config
+hostname: ${hostname}
+manage_etc_hosts: true
+disable_root: true
+ssh_pwauth: false
+
+users:
+  - name: ${ssh_user}
+    groups: [adm, sudo]
+    shell: /bin/bash
+    lock_passwd: true
+    sudo: "ALL=(ALL) NOPASSWD:ALL"
+    ssh_authorized_keys:
+      - ${jsonencode(ssh_public_key)}
+
+# Ubuntu cloud images include OpenSSH, Python and cloud-init.
+# Leave Docker, monitoring and applications to Ansible.
+growpart:
+  mode: auto
+  devices: ["/"]
+resize_rootfs: true

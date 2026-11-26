@@ -1,0 +1,15 @@
+# Copy to terraform.tfvars (ignored by Git), then paste your actual PUBLIC key.
+ssh_public_key = "ssh-ed25519 REPLACE_WITH_YOUR_PUBLIC_KEY platinum@arch"
+
+vm_name    = "packet-road-tf"
+memory_mib = 4096
+vcpu       = 2
+disk_gib   = 20
+ssh_user   = "platinum"
+
+# The existing libvirt pool and NAT/DHCP network must already be active.
+storage_pool = "default"
+network_name = "default"
+
+# Optional: use a previously downloaded and verified Ubuntu cloud image.
+# cloud_image = "/absolute/path/ubuntu-24.04-server-cloudimg-amd64.img"

@@ -1,2 +1,15 @@
 __pycache__/
 /ansible/vault.yml
+
+# Terraform caches, local state, plans and machine-specific values.
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+*.tfvars
+*.tfvars.json
+crash.log
+crash.*.log
+/terraform/.provider-mirror/
+/terraform/.terraformrc.mirror
+/ansible/inventory.tf.ini
