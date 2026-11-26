@@ -37,6 +37,9 @@ jobs:
 
       - name: check code with Ruff
         run: python -m ruff check .
+
+      - name: Test CLI and local HTTP TLS connections
+        run: python -m unittest discover -s tests -v
     
   docker-build:
     name: docker build
