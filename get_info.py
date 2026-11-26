@@ -1,7 +1,7 @@
 import http.client
 import ipaddress
-import os
 import random
+import re
 import socket
 import ssl
 import sys
@@ -23,6 +23,56 @@ from scapy.all import (
     sr1,
     srp,
 )
+
+
+def normalize_target(value):
+    """Validate one IPv4 address or DNS hostname, including IDNA names."""
+    target = value.strip()
+    if not target or any(char.isspace() or ord(char) < 32 for char in target):
+        raise ValueError("Введите домен или IPv4 без пробелов.")
+    try:
+        address = ipaddress.ip_address(target)
+    except ValueError:
+        if any(char in target for char in "/:@?#\\"):
+            raise ValueError("Введите домен без схемы, порта и пути.") from None
+        if re.fullmatch(r"[0-9.]+", target):
+            raise ValueError("Некорректный IPv4-адрес.") from None
+        try:
+            target = target.removesuffix(".").encode("idna").decode("ascii").lower()
+        except UnicodeError:
+            raise ValueError("Некорректное доменное имя.") from None
+        labels = target.split(".")
+        if len(target) > 253 or any(
+            not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label)
+            for label in labels
+        ):
+            raise ValueError("Некорректное доменное имя.")
+        return target
+    if address.version != 4:
+        raise ValueError("Пока поддерживается только IPv4.")
+    return str(address)
+
+
+def valid_path(path):
+    return (
+        path.startswith("/")
+        and path.isascii()
+        and "#" not in path
+        and not any(char.isspace() or ord(char) < 32 or ord(char) == 127 for char in path)
+    )
+
+
+def raw_probes_available():
+    """Check actual socket access rather than assuming uid 0 means NET_RAW."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_ICMP):
+            pass
+        if hasattr(socket, "AF_PACKET"):
+            with socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(0x0800)):
+                pass
+    except OSError:
+        return False
+    return True
 
 
 def heading(title):
@@ -68,25 +118,10 @@ def ask_settings():
         ).strip() or "example.com"
 
         try:
-            address = ipaddress.ip_address(target)
-        except ValueError:
-            if (
-                any(char.isspace() for char in target)
-                or any(char in target for char in "/:@?#")
-            ):
-                print("Введите домен без https://, порта и пути.")
-                continue
-
-            try:
-                target = target.encode("idna").decode("ascii")
-            except UnicodeError:
-                print("Не удалось преобразовать доменное имя.")
-                continue
-        else:
-            if address.version != 4:
-                print("Пока поддерживается только IPv4.")
-                continue
-
+            target = normalize_target(target)
+        except ValueError as error:
+            print(error)
+            continue
         break
 
     while True:
@@ -110,15 +145,7 @@ def ask_settings():
     while True:
         path = input("Путь страницы [/]: ").strip() or "/"
 
-        if (
-            path.startswith("/")
-            and not any(
-                char.isspace() or ord(char) < 32 or ord(char) == 127
-                for char in path
-            )
-            and path.isascii()
-            and "#" not in path
-        ):
+        if valid_path(path):
             break
 
         print(
@@ -128,7 +155,7 @@ def ask_settings():
 
     max_hops = ask_number(
         "Максимум переходов traceroute",
-        20,
+        30,
         int,
         1,
         255,
@@ -152,6 +179,7 @@ def ask_settings():
 
 def resolve_target(target, timeout):
     heading("1. DNS — ПОЛУЧАЕМ IP-АДРЕС")
+    target = normalize_target(target)
 
     try:
         address = ipaddress.ip_address(target)
@@ -237,13 +265,16 @@ def resolve_target(target, timeout):
         dict.fromkeys(record.address for record in answer)
     )
 
+    if not addresses:
+        raise RuntimeError(f"DNS не вернул IPv4 для {target}")
+
     print("\nПолученные IPv4:", ", ".join(addresses))
     print("Для дальнейших проверок выбран:", addresses[0])
 
     return addresses[0]
 
 
-def show_route(target, timeout):
+def show_route(target, timeout, raw_available=True):
     heading("2. МАРШРУТИЗАЦИЯ — КУДА ОТПРАВИТЬ ПАКЕТ")
 
     interface, source, gateway = conf.route.route(target)
@@ -271,6 +302,14 @@ def show_route(target, timeout):
 
     if str(interface) == "lo":
         print("\nLoopback: пакет остаётся внутри компьютера. ARP не нужен.")
+        return
+
+    if not raw_available:
+        print("\nARP пропущен: нет доступа к raw sockets. DNS и TCP/TLS/HTTP продолжим.")
+        return
+
+    if getattr(interface, "type", 1) != 1:
+        print("\nИнтерфейс не Ethernet: ARP для него пропускаем.")
         return
 
     try:
@@ -655,13 +694,13 @@ def request_site(target, target_ip, scheme, port, path, timeout):
 
 def main():
     try:
-        if hasattr(os, "geteuid") and os.geteuid() != 0:
+        raw_available = raw_probes_available()
+        if not raw_available:
             print(
-                "Для ARP и traceroute нужны права root."
-                "\nЗапуск: sudo .venv/bin/python get_info.py",
-                file=sys.stderr,
+                "Нет доступа к raw sockets: ARP и traceroute будут пропущены."
+                "\nDNS, TCP, TLS и HTTP доступны без sudo."
+                "\nДля полного запуска нужны root или NET_RAW в контейнере."
             )
-            return 1
 
         (
             target,
@@ -674,14 +713,17 @@ def main():
 
         target_ip = resolve_target(target, timeout)
 
-        show_route(target_ip, timeout)
+        try:
+            show_route(target_ip, timeout, raw_available)
+        except (OSError, RuntimeError) as error:
+            print(f"\nЛокальный маршрут определить не удалось: {error}")
+            print("Проверим обычное подключение средствами ОС.")
 
-        trace_reached = trace_route(
-            target_ip,
-            port,
-            max_hops,
-            timeout,
-        )
+        trace_reached = False
+        if raw_available:
+            trace_reached = trace_route(target_ip, port, max_hops, timeout)
+        else:
+            heading("3. TRACEROUTE — ПРОПУЩЕН: НЕТ RAW SOCKETS")
 
         http_received = request_site(
             target,
@@ -700,6 +742,7 @@ def main():
 
         print(
             "Traceroute:",
+            "пропущен (нет raw sockets)" if not raw_available else
             "получен TCP-ответ цели"
             if trace_reached
             else "конечный TCP-ответ не получен",
@@ -712,7 +755,7 @@ def main():
             else "проверка не завершена",
         )
 
-        if http_received and not trace_reached:
+        if http_received and raw_available and not trace_reached:
             print(
                 "\nHTTP работает, хотя traceroute не достиг цели."
                 "\nОтветы на диагностические пробы и доступность"
@@ -720,8 +763,8 @@ def main():
             )
 
         print(
-            "\nУпрощённая вложенность данных для HTTPS:"
-            "\n  HTTP → TLS → TCP → IP → локальный канал"
+            f"\nВложенность данных для {scheme.upper()}:"
+            f"\n  HTTP → {'TLS → ' if scheme == 'https' else ''}TCP → IP → локальный канал"
             "\n\nДанные могут делиться на несколько сегментов и пакетов."
             "\nТочный путь внутри инфраструктуры сайта этот CLI"
             "\nне видит: для него нужны логи, метрики и трассировка"
