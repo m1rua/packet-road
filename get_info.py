@@ -20,9 +20,11 @@ from scapy.all import (
     Ether,
     conf,
     get_if_hwaddr,
+    send,
     sr1,
     srp,
 )
+from scapy.error import Scapy_Exception
 
 
 def normalize_target(value):
@@ -355,6 +357,39 @@ def show_route(target, timeout, raw_available=True):
     )
 
 
+def trace_reply_kind(reply, probe):
+    """Match the outer reply and quoted probe; ICMP may embed TCPerror."""
+    if reply is None or not reply.haslayer(IP):
+        return None
+    outer = reply[IP]
+    transport = outer.payload
+    if isinstance(transport, ICMP):
+        quoted = transport.payload
+        if not isinstance(quoted, IP) or not isinstance(quoted.payload, TCP):
+            return None
+        tcp = quoted.payload
+        if (quoted.dst, tcp.sport, tcp.dport, tcp.seq) != (
+            probe.dst, probe[TCP].sport, probe[TCP].dport, probe[TCP].seq
+        ):
+            return None
+        if transport.type == 11 and transport.code == 0:
+            return "hop"
+        if transport.type == 3:
+            return "unreachable"
+        return "icmp"
+    if isinstance(transport, TCP) and outer.src == probe.dst:
+        if (transport.sport, transport.dport) != (probe[TCP].dport, probe[TCP].sport):
+            return None
+        flags = int(transport.flags)
+        if flags & 0x10 and transport.ack != (probe[TCP].seq + 1) % (2**32):
+            return None
+        if flags & 0x04:
+            return "closed"
+        if flags & 0x12 == 0x12:
+            return "open"
+    return None
+
+
 def trace_route(target, port, max_hops, timeout):
     heading("3. TRACEROUTE — ИЩЕМ ПРОМЕЖУТОЧНЫЕ УЗЛЫ")
 
@@ -369,6 +404,8 @@ def trace_route(target, port, max_hops, timeout):
 
     sport = random.randint(32768, 60999)
     reached = False
+    replies = 0
+    stopped = False
 
     try:
         for ttl in range(1, max_hops + 1):
@@ -379,7 +416,7 @@ def trace_route(target, port, max_hops, timeout):
 
             packet = (
                 IP(dst=target, ttl=ttl)
-                / TCP(sport=sport, dport=port, flags="S")
+                / TCP(sport=sport, dport=port, seq=random.getrandbits(32), flags="S")
             )
 
             start = time.perf_counter()
@@ -394,49 +431,42 @@ def trace_route(target, port, max_hops, timeout):
                 continue
 
             print(f"  Ответ от {reply.src}, RTT {elapsed:.1f} мс.")
-
-            if reply.haslayer(ICMP):
-                icmp = reply[ICMP]
-
-                if icmp.type == 11 and icmp.code == 0:
-                    print(
-                        "  ICMP Time Exceeded: здесь закончился TTL."
-                    )
-                elif icmp.type == 3:
-                    print(
-                        "  ICMP Destination Unreachable:"
-                        f" узел сообщил о недоступности, код {icmp.code}."
-                        "\n  Останавливаем трассировку."
-                    )
-                    break
+            kind = trace_reply_kind(reply, packet)
+            if kind is None:
+                print("  Ответ не соответствует текущей пробе; продолжаем.")
+                continue
+            replies += 1
+            if kind == "hop":
+                print("  ICMP Time Exceeded: здесь закончился TTL.")
+            elif kind == "unreachable":
+                print(
+                    f"  ICMP Destination Unreachable, код {reply[ICMP].code}."
+                    "\n  Останавливаем пробы; обычное TCP-соединение проверим отдельно."
+                )
+                stopped = True
+                break
+            elif kind in ("open", "closed"):
+                reached = True
+                if kind == "open":
+                    print("  TCP SYN-ACK с адреса цели: порт открыт.")
+                    # Close our half-open probe; the OS may also send its own RST.
+                    try:
+                        send(
+                            IP(dst=target) / TCP(
+                                sport=sport, dport=port, seq=reply[TCP].ack, flags="R"
+                            ),
+                            verbose=0,
+                        )
+                    except (OSError, Scapy_Exception) as error:
+                        print(f"  Ответ получен, но отправить завершающий RST не удалось: {error}")
                 else:
-                    print(
-                        f"  ICMP type={icmp.type}, code={icmp.code}."
-                    )
-
-            elif reply.src == target and reply.haslayer(TCP):
-                flags = int(reply[TCP].flags)
-
-                if flags & 0x04:
-                    print(
-                        "  TCP RST с адреса цели: порт закрыт"
-                        "\n  или соединение отклонено."
-                    )
-                    reached = True
-                    break
-
-                if (flags & 0x12) == 0x12:
-                    print(
-                        "  TCP SYN-ACK с адреса цели: порт открыт."
-                    )
-                    reached = True
-                    break
-
-                print(f"  Другие TCP-флаги: {reply[TCP].flags}.")
+                    print("  TCP RST с адреса цели: порт закрыт или соединение отклонено.")
+                break
             else:
-                print("  Неожиданный ответ.")
+                print(f"  ICMP type={reply[ICMP].type}, code={reply[ICMP].code}.")
 
-    except Exception as error:
+    except (OSError, Scapy_Exception) as error:
+        stopped = True
         print(f"\nОшибка traceroute: {error}")
         print("Продолжаем обычное TCP-подключение.")
 
@@ -445,6 +475,9 @@ def trace_route(target, port, max_hops, timeout):
             "\nКонечный TCP-ответ в трассировке не получен."
             "\nЭто ещё не означает, что сайт недоступен."
         )
+        if not stopped:
+            print(f"Проверены TTL от 1 до {max_hops}; ответов на свои пробы: {replies}.")
+            print("Возможны больший маршрут или фильтрация ответов; причина пока не установлена.")
 
     print(
         "\nЭто диагностические пробы, а не перехват HTTP-запроса."
