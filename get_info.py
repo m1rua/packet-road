@@ -6,6 +6,7 @@ import socket
 import ssl
 import sys
 import time
+from dataclasses import dataclass
 
 import dns.exception
 import dns.flags
@@ -495,6 +496,42 @@ def format_certificate_name(parts):
     )
 
 
+@dataclass
+class SiteResult:
+    tcp_connected: bool = False
+    tls_established: bool = False
+    http_status: int | None = None
+    failed_stage: str | None = None
+    error: str | None = None
+
+    @property
+    def received(self):
+        return self.http_status is not None
+
+    @property
+    def successful(self):
+        return self.received and 200 <= self.http_status < 400 and self.error is None
+
+
+class FinalHTTPResponse(http.client.HTTPResponse):
+    """Consume informational responses using the SAME buffered socket reader."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.informational_count = 0
+
+    def _read_status(self):
+        while True:
+            version, status, reason = super()._read_status()
+            if not (100 <= status < 200) or status == 101:
+                return version, status, reason
+            self.informational_count += 1
+            if self.informational_count > 10:
+                raise http.client.HTTPException("слишком много промежуточных HTTP-ответов")
+            http.client.parse_headers(self.fp)
+            print(f"\nПромежуточный HTTP-ответ: {status} {reason.strip()}")
+
+
 def request_site(target, target_ip, scheme, port, path, timeout):
     heading("4. TCP — УСТАНАВЛИВАЕМ СОЕДИНЕНИЕ")
 
@@ -512,6 +549,8 @@ def request_site(target, target_ip, scheme, port, path, timeout):
 
     connection = None
     response = None
+    result = SiteResult()
+    stage = "TCP"
 
     try:
         start = time.perf_counter()
@@ -520,6 +559,7 @@ def request_site(target, target_ip, scheme, port, path, timeout):
             (target_ip, port),
             timeout=timeout,
         )
+        result.tcp_connected = True
 
         elapsed = (time.perf_counter() - start) * 1000
 
@@ -531,6 +571,7 @@ def request_site(target, target_ip, scheme, port, path, timeout):
         print(f"Удалённый сокет: {peer_ip}:{peer_port}")
 
         if scheme == "https":
+            stage = "TLS"
             heading("5. TLS — ЗАЩИЩАЕМ СОЕДИНЕНИЕ")
 
             print(
@@ -545,12 +586,14 @@ def request_site(target, target_ip, scheme, port, path, timeout):
             )
 
             context = ssl.create_default_context()
+            context.set_alpn_protocols(["http/1.1"])
             start = time.perf_counter()
 
             connection = context.wrap_socket(
                 connection,
                 server_hostname=target,
             )
+            result.tls_established = True
 
             elapsed = (time.perf_counter() - start) * 1000
             certificate = connection.getpeercert()
@@ -591,6 +634,7 @@ def request_site(target, target_ip, scheme, port, path, timeout):
             )
 
         heading("6. HTTP — ЗАПРАШИВАЕМ СТРАНИЦУ")
+        stage = "HTTP"
 
         default_port = 443 if scheme == "https" else 80
         host = target if port == default_port else f"{target}:{port}"
@@ -623,22 +667,9 @@ def request_site(target, target_ip, scheme, port, path, timeout):
 
         connection.sendall(request.encode("ascii"))
 
-        response = http.client.HTTPResponse(connection)
+        response = FinalHTTPResponse(connection)
         response.begin()
-
-        for _ in range(10):
-            if not (
-                100 <= response.status < 200
-                and response.status != 101
-            ):
-                break
-
-            print(f"\nПромежуточный HTTP-ответ: {response.status}")
-            response.close()
-            response = http.client.HTTPResponse(connection)
-            response.begin()
-        else:
-            raise RuntimeError("слишком много промежуточных HTTP-ответов")
+        result.http_status = response.status
 
         elapsed = (time.perf_counter() - start) * 1000
 
@@ -680,14 +711,23 @@ def request_site(target, target_ip, scheme, port, path, timeout):
                 "\nПроблема может быть в приложении или upstream-сервисе."
             )
 
+        if response.status >= 400:
+            result.failed_stage = "HTTP"
+            result.error = f"HTTP {response.status}: сервер ответил ошибкой"
+        elif response.status == 101:
+            result.failed_stage = "HTTP"
+            result.error = "Сервер предложил смену протокола; этот CLI проверяет HTTP/1.1"
+            print(result.error)
+
         print(
-            "\nТело страницы не скачиваем и не отображаем."
+            "\nТело ответа не читаем и не отображаем."
             "\nHTTP-ответ получен; соединение закрываем."
         )
 
-        return True
+        return result
 
     except ssl.SSLCertVerificationError as error:
+        result.error = f"Проверка сертификата: {error}"
         print(f"\nНе прошла проверка TLS-сертификата: {error}")
         print(
             "TCP работал, но доверенное HTTPS-соединение"
@@ -697,22 +737,25 @@ def request_site(target, target_ip, scheme, port, path, timeout):
         )
 
     except ssl.SSLError as error:
+        result.error = str(error)
         print(f"\nОшибка TLS: {error}")
         print("Проверьте, поддерживает ли выбранный порт HTTPS.")
 
     except ConnectionRefusedError:
+        result.error = "В соединении отказано"
         print(
             "\nВ TCP-соединении отказано."
             "\nСервис может не слушать порт или соединение отклоняется."
         )
 
     except (socket.timeout, TimeoutError):
+        result.error = f"Таймаут на этапе {stage} ({timeout} сек.)"
         print(
-            "\nТекущая сетевая операция превысила таймаут."
-            "\nСмотрите последний начатый шаг: TCP, TLS или HTTP."
+            f"\n{result.error}"
         )
 
     except (OSError, http.client.HTTPException, RuntimeError) as error:
+        result.error = str(error)
         print(f"\nПроверку завершить не удалось: {error}")
 
     finally:
@@ -722,7 +765,8 @@ def request_site(target, target_ip, scheme, port, path, timeout):
         if connection is not None:
             connection.close()
 
-    return False
+    result.failed_stage = stage
+    return result
 
 
 def main():
@@ -758,7 +802,7 @@ def main():
         else:
             heading("3. TRACEROUTE — ПРОПУЩЕН: НЕТ RAW SOCKETS")
 
-        http_received = request_site(
+        site = request_site(
             target,
             target_ip,
             scheme,
@@ -782,15 +826,22 @@ def main():
         )
 
         print(
-            "HTTP:",
-            "ответ получен"
-            if http_received
-            else "проверка не завершена",
+            "TCP:", "соединение установлено" if site.tcp_connected else "не установлено"
         )
+        print(
+            "TLS:", "не используется" if scheme == "http" else
+            "сертификат проверен, соединение защищено" if site.tls_established else "не установлено"
+        )
+        print(
+            "HTTP:",
+            f"получен статус {site.http_status}" if site.received else "ответ не получен",
+        )
+        if site.error:
+            print(f"Проблема на этапе {site.failed_stage}: {site.error}")
 
-        if http_received and raw_available and not trace_reached:
+        if site.received and raw_available and not trace_reached:
             print(
-                "\nHTTP работает, хотя traceroute не достиг цели."
+                "\nHTTP-ответ получен, хотя traceroute не достиг цели."
                 "\nОтветы на диагностические пробы и доступность"
                 "\nприложения — разные проверки."
             )
@@ -804,7 +855,8 @@ def main():
             "\nсо стороны сервера."
         )
 
-        return 0 if http_received else 2
+        print("\nКод завершения: 0 — HTTP 2xx/3xx; 2 — сбой подключения или HTTP 4xx/5xx.")
+        return 0 if site.successful else 2
 
     except (KeyboardInterrupt, EOFError):
         print("\nРабота остановлена пользователем.")

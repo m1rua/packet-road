@@ -38,7 +38,7 @@ class SettingsTests(unittest.TestCase):
                 patch.object(app, "resolve_target", return_value="192.0.2.1"), \
                 patch.object(app, "show_route"), \
                 patch.object(app, "trace_route") as trace, \
-                patch.object(app, "request_site", return_value=True), \
+                patch.object(app, "request_site", return_value=app.SiteResult(tcp_connected=True, http_status=200)), \
                 contextlib.redirect_stdout(io.StringIO()) as output:
             self.assertEqual(app.main(), 0)
         trace.assert_not_called()
