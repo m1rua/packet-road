@@ -6,7 +6,6 @@ spec:
   hostNetwork: true
   dnsPolicy: ClusterFirstWithHostNet
   restartPolicy: Never
-  restartPolicy: Never
   containers:
     - name: packet-road
       image: ghcr.io/m1rua/packet-road:sha-cdc390842d944bbf913e43102fdcf4ac2f0f11e0
