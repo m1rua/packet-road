@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read 
+  contents: read
 
 concurrency:
   group: cli-checks-${{ github.workflow }}-${{ github.ref }}
@@ -30,7 +30,7 @@ jobs:
 
       - name: install dependencies
         run: |
-          python -m pip install -r requirements.txt
+          python -m pip install -r requirements-ci.txt
 
       - name: check python syntax
         run: python -m py_compile get_info.py
@@ -40,12 +40,12 @@ jobs:
 
       - name: Test CLI and local HTTP TLS connections
         run: python -m unittest discover -s tests -v
-    
+
   docker-build:
     name: docker build
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    needs: [checks, ansible-checks, helm-checks, terraform-checks]
+    needs: [checks, ansible-checks, helm-checks, terraform-checks, monitoring-checks]
     permissions:
       contents: read
       packages: write
@@ -55,42 +55,42 @@ jobs:
 
       - name: docker build
         run: docker build -t ghcr.io/m1rua/packet-road:sha-${{ github.sha }} .
-      
+
       - name: log in to GHCR
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: docker/login-action@v3
         with:
-          registry: ghcr.io 
+          registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      
+
       - name: push image to GHCR
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: docker push ghcr.io/m1rua/packet-road:sha-${{ github.sha }}
-  
+
   ansible-checks:
     name: ansible checks
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    steps: 
-      - name: checkout repository 
+    steps:
+      - name: checkout repository
         uses: actions/checkout@v4
-        
+
       - name: setup python
         uses: actions/setup-python@v5
-        with: 
+        with:
           python-version: "3.12"
-      
+
       - name: install ansible
         run: python -m pip install -r requirements-ci.txt
 
       - name: install ansible collections
-        run: ansible-galaxy collection install -r ansible/requirements.yml 
-        
+        run: ansible-galaxy collection install -r ansible/requirements.yml
+
       - name: create test variables
         run: |
           echo 'ghcr_token: "ci-placeholder"' > ansible/vault.yml
-      
+
       - name: syntax check
         run: ansible-playbook -i ansible/inventory.ini ansible/setup.yml --syntax-check
 
@@ -98,7 +98,7 @@ jobs:
         run: ansible-lint ansible/setup.yml
 
   helm-checks:
-    name: helm-checks
+    name: Helm and configuration checks
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -110,14 +110,48 @@ jobs:
         with:
           version: "v3.19.0"
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install validation tools
+        run: python -m pip install -r requirements-ci.txt
+
       - name: checkout chart
         run: helm lint helm/packet-road
 
       - name: render chart with host network
-        run: helm template packet-road helm/packet-road --set hostNetwork=true > /dev/null
+        run: helm template packet-road helm/packet-road --set hostNetwork=true > "$RUNNER_TEMP/packet-road-host.yaml"
 
       - name: render chart with pod network
-        run: helm template packet-road helm/packet-road --set hostNetwork=false > /dev/null
+        run: helm template packet-road helm/packet-road --set hostNetwork=false > "$RUNNER_TEMP/packet-road-pod.yaml"
+
+      - name: Render private registry configuration
+        run: helm template packet-road helm/packet-road --set 'imagePullSecrets[0].name=ghcr-pull' > "$RUNNER_TEMP/packet-road-private.yaml"
+
+      - name: Check YAML, Pod schemas and Grafana references
+        run: |
+          python scripts/check_configs.py \
+            --rendered-pod "$RUNNER_TEMP/packet-road-host.yaml" \
+            --rendered-pod "$RUNNER_TEMP/packet-road-pod.yaml" \
+            --rendered-pod "$RUNNER_TEMP/packet-road-private.yaml"
+
+  monitoring-checks:
+    name: Prometheus configuration checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check Prometheus configuration and alert rules
+        run: |
+          docker run --rm --network none --user 0:0 \
+            --mount "type=bind,src=$PWD/ansible/files,dst=/etc/prometheus,readonly" \
+            --entrypoint /bin/promtool \
+            prom/prometheus:v3.16.0@sha256:e04987641b57704f408e31f6373ba4138ecf27cb4a165d24aabb6c38fddd0f06 \
+            check config /etc/prometheus/prometheus.yml
 
   terraform-checks:
     name: Terraform checks

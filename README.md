@@ -144,6 +144,9 @@ ghcr_token: "YOUR_GITHUB_CLASSIC_TOKEN"
 
 Текущий playbook выполняет вход в GHCR, поэтому ожидает токен с `read:packages`,
 хотя публичный образ можно скачивать без входа. `vault.yml` исключён из Git.
+`.env` также исключён из Git и не загружается CLI. Образец без секретов —
+[.env.example](.env.example). Ранее опубликованные токены и пароли, если они
+использовались, необходимо заменить: удаление файла не очищает историю Git.
 
 ```bash
 ansible lab -i ansible/inventory.ini -m ping
@@ -294,6 +297,7 @@ State, tfvars, планы и локальный mirror исключены из G
 ## Проверки и CI
 
 ```bash
+.venv/bin/python -m pip install -r requirements-ci.txt
 .venv/bin/python -m ruff check .
 .venv/bin/python -m unittest discover -s tests -v
 terraform -chdir=terraform fmt -check -recursive
@@ -303,6 +307,24 @@ terraform -chdir=terraform test
 Python-тесты проверяют ввод, права, сопоставление ICMP/TCP-проб и локальные
 HTTP/TLS-соединения. Для TLS-тестов нужен исполняемый `openssl`.
 Terraform-тесты используют mock-provider и не создают VM.
+Версии Python-пакетов закреплены в `requirements.txt` и `requirements-ci.txt`,
+Ansible-коллекций — в `ansible/requirements.yml`, Helm в CI — 3.19.0.
+
+Проверка YAML (включая дубликаты ключей), Pod по строгой схеме Kubernetes 1.37,
+UID источника Grafana, mounts и согласованности тегов:
+
+```bash
+.venv/bin/python scripts/check_configs.py
+```
+
+Схема скачивается из закреплённого коммита upstream с проверкой SHA256.
+Для работы без сети передай заранее скачанный файл через `--pod-schema PATH`;
+его контрольная сумма также проверяется. Можно дополнительно проверить результат
+`helm template` через `--rendered-pod PATH`.
+
+CI также проверяет основной конфиг Prometheus и загружаемые alert rules через
+`promtool` из закреплённого образа Prometheus 3.16.0. Проверки конфигов должны
+пройти до сборки и публикации CLI-образа.
 
 GitHub Actions выполняет Python, Ansible, Helm и Terraform checks, затем собирает
 Docker-образ. Только push в `main` публикует образ в GHCR через `GITHUB_TOKEN`.
