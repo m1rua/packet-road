@@ -1,0 +1,16 @@
+.git
+.venv
+venv
+__pycache__
+*.pyc
+.env
+.env.*
+ansible/vault.yml
+**/.terraform
+**/.provider-mirror
+**/.terraformrc.mirror
+**/*.tfstate
+**/*.tfstate.*
+**/*.tfvars
+**/*.tfvars.json
+**/*.tfplan

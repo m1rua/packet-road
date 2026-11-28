@@ -13,3 +13,10 @@ crash.*.log
 /terraform/.provider-mirror/
 /terraform/.terraformrc.mirror
 /ansible/inventory.tf.ini
+
+# Local credentials and Python environments.
+.env
+.env.*
+!.env.example
+.venv/
+venv/
