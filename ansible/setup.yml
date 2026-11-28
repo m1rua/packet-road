@@ -3,7 +3,7 @@
   become: true
 
   vars:
-    packet_road_image: ghcr.io/m1rua/packet-road:sha-891906fc6da533ea8a4de7130062e4e56e2fadbf
+    packet_road_image: ghcr.io/m1rua/packet-road:sha-cdc390842d944bbf913e43102fdcf4ac2f0f11e0
     grafana_image: grafana/grafana:nightly-slim
 
   vars_files:

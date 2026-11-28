@@ -9,7 +9,7 @@ spec:
   restartPolicy: Never
   containers:
     - name: packet-road
-      image: ghcr.io/m1rua/packet-road:sha-3f1a0a54f9a6fb848deb54f95239158d9d6b4803
+      image: ghcr.io/m1rua/packet-road:sha-cdc390842d944bbf913e43102fdcf4ac2f0f11e0
       stdin: true
       tty: true
       securityContext:

@@ -1,6 +1,6 @@
 image:
   repository: ghcr.io/m1rua/packet-road
-  tag: "sha-c062c2de1f126f1c1cf0027088536076b655b44b"
+  tag: "sha-cdc390842d944bbf913e43102fdcf4ac2f0f11e0"
   pullPolicy: IfNotPresent
 
 hostNetwork: true
