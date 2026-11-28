@@ -3,6 +3,10 @@ kind: Pod
 metadata:
   name: {{ .Release.Name }}
 spec:
+  {{- with .Values.imagePullSecrets }}
+  imagePullSecrets:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
   hostNetwork: {{ .Values.hostNetwork }}
   dnsPolicy: {{ ternary "ClusterFirstWithHostNet" "ClusterFirst" .Values.hostNetwork }}
   restartPolicy: Never

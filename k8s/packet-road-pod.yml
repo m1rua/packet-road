@@ -3,6 +3,8 @@ kind: Pod
 metadata:
   name: packet-road
 spec:
+  # For private GHCR: [{name: ghcr-pull}], with that Secret already created.
+  imagePullSecrets: []
   hostNetwork: true
   dnsPolicy: ClusterFirstWithHostNet
   restartPolicy: Never

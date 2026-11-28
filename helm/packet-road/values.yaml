@@ -4,3 +4,6 @@ image:
   pullPolicy: IfNotPresent
 
 hostNetwork: true
+
+# For a private GHCR package, create this Secret in the release namespace first.
+imagePullSecrets: []

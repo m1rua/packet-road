@@ -232,7 +232,22 @@ helm template packet-road helm/packet-road --set hostNetwork=false
 
 Чтобы реально изменить сетевой режим, пересоздай Pod/release: это поле нельзя
 свободно менять у существующего Pod. Для приватного образа потребуется отдельный
-`imagePullSecret`; сохранённый `docker login` к Kubernetes не относится.
+`imagePullSecret`; сохранённый `docker login` к Kubernetes сам по себе не относится.
+Если GHCR отвечает `401`, проверь видимость пакета или настрой Secret. Например,
+**в Ubuntu**, где уже выполнен `sudo docker login ghcr.io` и root-конфиг содержит
+авторизацию GHCR:
+
+```bash
+sudo k3s kubectl create namespace lab --dry-run=client -o yaml | sudo k3s kubectl apply -f -
+sudo k3s kubectl create secret generic ghcr-pull -n lab \
+  --type=kubernetes.io/dockerconfigjson \
+  --from-file=.dockerconfigjson=/root/.docker/config.json
+```
+
+Затем на управляющей машине добавь к `helm install`:
+`--set 'imagePullSecrets[0].name=ghcr-pull'`. Secret должен находиться в том же
+namespace, что и Pod. В обычном манифесте укажи
+`imagePullSecrets: [{name: ghcr-pull}]` внутри `spec`. Содержимое Secret не коммитится.
 
 ## Terraform / libvirt
 
