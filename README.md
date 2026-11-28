@@ -157,8 +157,9 @@ ansible-playbook -i ansible/inventory.ini ansible/setup.yml \
 Playbook доставляет конфиги Prometheus с проверкой через `promtool`, создаёт volume
 `grafana_data` и подключает provisioning-файлы к Grafana. Изменение конфигурации
 уведомляет handler перезапуска. Повторный запуск без изменений сохраняет состояние.
-Версии образов задаются в `vars` playbook; Grafana сейчас использует `nightly-slim`,
-для фиксированного релиза этот тег следует заменить.
+Версии образов задаются в `vars` playbook. Grafana закреплена по digest nightly-образа:
+повторная установка использует то же содержимое. Переход с nightly 13.4 на stable 13.3
+может оказаться downgrade базы; сначала сохрани данные и проверь миграцию отдельно.
 
 ## Мониторинг и alert
 

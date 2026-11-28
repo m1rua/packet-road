@@ -4,7 +4,7 @@
 
   vars:
     packet_road_image: ghcr.io/m1rua/packet-road:sha-cdc390842d944bbf913e43102fdcf4ac2f0f11e0
-    grafana_image: grafana/grafana:nightly-slim
+    grafana_image: grafana/grafana:nightly-slim@sha256:8e4af256147165a3e9bc997f85caf3fb3fad0eafb5f8b82ebb5ad5f65ce6bb5a
 
   vars_files:
     - vault.yml

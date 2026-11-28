@@ -1,0 +1,5 @@
+-r requirements.txt
+ansible-core==2.21.6
+ansible-lint==26.11.1
+PyYAML==6.0.4
+jsonschema==4.26.0
